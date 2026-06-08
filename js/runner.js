@@ -22,14 +22,17 @@ function injectImportMap(html, files) {
 }
 
 // js/runner.js — Project runner
-// Strategy 1 (preferred): Service Worker virtual server — all relative imports
-//   and fetch() calls resolve natively because every file has a real URL.
-// Strategy 2 (fallback):  Blob bundler — rewrites import specifiers to blob: URLs.
+// Strategy 0 (best):      Node.js server — files get real HTTP URLs, all relative
+//   ES module imports resolve natively. No blob: or SW scope issues.
+// Strategy 1 (fallback):  Service Worker virtual server — relative imports resolve
+//   natively because every file has a real URL under /__nebula__/preview/.
+// Strategy 2 (last resort): Blob bundler — rewrites import specifiers to blob: URLs.
 
 import { dom, state }         from './state.js';
 import { logToConsole }       from './ui.js';
 import { saveCurrentProject } from './projects.js';
 import { activateProjectInSW, isSwAvailable } from './sw-bridge.js';
+import { buildWithServer, isServerRunnerAvailable } from './server-runner.js';
 
 // ── Path resolver ──────────────────────────────────────────────────────────────
 function resolvePath(base, rel) {
@@ -336,12 +339,21 @@ export async function runProject() {
 
     let previewUrl = null;
 
-    if (isSwAvailable()) {
-        logToConsole('info', '▶ Running via Service Worker (full path support)…');
+    // Strategy 0 — Node.js server (best: real HTTP URLs, native relative imports)
+    if (await isServerRunnerAvailable()) {
+        logToConsole('info', '▶ Running via server (full ES module support)…');
+        previewUrl = await buildWithServer(files);
+        if (!previewUrl) logToConsole('warn', 'Server build failed — trying Service Worker…');
+    }
+
+    // Strategy 1 — Service Worker
+    if (!previewUrl && isSwAvailable()) {
+        logToConsole('info', '▶ Running via Service Worker…');
         previewUrl = await buildWithSW(files);
         if (!previewUrl) logToConsole('warn', 'SW build failed — falling back to blob runner.');
     }
 
+    // Strategy 2 — Blob bundler (last resort)
     if (!previewUrl) {
         logToConsole('info', '▶ Running via blob bundler…');
         previewUrl = buildProjectHtml(files);
@@ -376,9 +388,10 @@ export async function runProjectInTab(id) {
     preRunChecks(project.files);
 
     let previewUrl = null;
-    if (isSwAvailable()) previewUrl = await buildWithSW(project.files);
-    if (!previewUrl)     previewUrl = buildProjectHtml(project.files);
-    if (!previewUrl)     return alert('No HTML entry point found in this project.');
+    if (await isServerRunnerAvailable()) previewUrl = await buildWithServer(project.files);
+    if (!previewUrl && isSwAvailable())  previewUrl = await buildWithSW(project.files);
+    if (!previewUrl)                     previewUrl = buildProjectHtml(project.files);
+    if (!previewUrl)                     return alert('No HTML entry point found in this project.');
 
     window.open(previewUrl, '_blank');
 }
